@@ -8,6 +8,20 @@
 #include <sys/stat.h>
 #include <signal.h>
 
+int mode; 			// Mode variable for foreground-only mode
+
+void switch_mode() {
+	if (mode == 0) {
+		char* message = "\nEntering foreground-only mode (& is now ignored)\n";
+		write(STDOUT_FILENO, message, 50);
+		mode = 1;
+	} else {
+		char* message = "\nExiting foreground-only mode\n";
+		write(STDOUT_FILENO, message, 30);
+		mode = 0;
+	}
+	return;
+}
 
 void type_prompt() {
 	static int first_time = 1;
@@ -70,21 +84,30 @@ void read_command (char cmd[], char *par[], int *background) {
 		array[i++] = strdup(token);
 		token = strtok (NULL, " \n");
 	}
-	if (count == 1) return;			// If no input, return
+	if (i == 0) {			// No command entered
+		cmd[0] = '\0';
+		par[0] = NULL;
+		*background = 0;
+		return;		
+	}
 
-	strcpy(cmd, array[0]);		// First token is command
+	if (i > 0) {
+		strcpy(cmd, array[0]);		// First token is command
+	}
 
 	for (int j = 0; j < i; j++) {		// Copy tokens to parameters array
 		par[j] = array[j];
 	}
 	par[i] = NULL;			// NULL-terminate the parameters array
 
-	if (strcmp(par[i - 1], "&") == 0) {	// Check for background process
-				par[i - 1] = NULL;	// Remove '&' from parameters
-				*background = 1;		// Set background flag
-	}
-	else {
-		*background = 0;		// Clear background flag
+	if (i > 0) {
+		if (strcmp(par[i - 1], "&") == 0) {	// Check for background process
+					par[i - 1] = NULL;	// Remove '&' from parameters
+					*background = 1;		// Set background flag
+		}
+		else {
+			*background = 0;		// Clear background flag
+		}
 	}
 	
 
@@ -104,6 +127,14 @@ void background_tracker() {
 }
 
 int main() {
+
+	struct sigaction SIGTSTP_action = {0}; // Set up SIGTSTP handler
+	SIGTSTP_action.sa_handler = switch_mode;
+	sigfillset(&SIGTSTP_action.sa_mask);
+	SIGTSTP_action.sa_flags = SA_RESTART; // Restart interrupted sys calls
+	sigaction(SIGTSTP, &SIGTSTP_action, NULL);
+
+	signal(SIGINT, SIG_IGN);		// Ignore SIGINT signals)
 
 	char cmd[100], command[100], *parameters[20];		// Command and parameters arrays
 
@@ -137,9 +168,20 @@ int main() {
 		}
 
 		pid_t pid = fork();		// Create a new process
+
+		if (mode == 1) {		// If in foreground-only mode, force foreground
+			background = 0;
+		}
 		
 		if (pid == 0) {
 			// Child process
+		
+			if (background == 1) {		// If background process, ignore SIGINT
+				signal(SIGINT, SIG_IGN);
+			}
+			if (background == 0) {		// Foreground process
+				signal(SIGINT, SIG_DFL);	// Restore default SIGINT behavior
+			}
 
 			for (int i = 0; parameters[i] != NULL; i++) {		// Check for output redirection
 				int fd;
@@ -207,15 +249,23 @@ int main() {
 			}
 
 			strcat(cmd, command);
+			signal(SIGTSTP, SIG_IGN);	// Ignore SIGTSTP in child process
+			signal(SIGINT, SIG_DFL);	// Restore default SIGINT behavior in child process
 			execvp(command, parameters); // Run command using execvp
 			perror("execvp failed"); // If execvp returns, an error occurred
 			exit(1);
 		}
 		else {
+			// Parent process
 			if (background != 1) {		// Parent process waits for child to finish
 				if (waitpid(pid, &status_value, 0)== -1) {
 					perror("waitpid failed");
 					exit(1);
+				}
+				WIFEXITED(status_value); 		// Check if child exited normally
+				if (WIFSIGNALED(status_value)) {
+					printf("terminated by signal %d\n", WTERMSIG(status_value));
+					fflush(stdout);
 				}
 			}
 			else {
